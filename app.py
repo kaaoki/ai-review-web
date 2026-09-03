@@ -2,9 +2,9 @@
 app.py
 文書自動レビューツール（Webアプリ版）
 
-- Gemini APIで文書をレビュー
+- Gemini APIで文書をレビュー（複数ファイル一括対応）
 - Supabaseに結果を永続保存
-- 過去のレビュー結果を一覧から選んで閲覧
+- レビュー結果を一覧から選んで閲覧
 
 必要なsecrets（.streamlit/secrets.toml、またはStreamlit CloudのSecrets管理画面）:
   APP_PASSWORD    = "任意のパスワード"
@@ -66,71 +66,82 @@ GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 
 
 # ---------------------------------------------------------------------------
-# 画面
+# 画面切り替え（st.tabsはコードから切り替えられないため、
+# セグメントコントロール＋session_stateで自前実装する）
 # ---------------------------------------------------------------------------
+VIEW_UPLOAD = "アップロード＆レビュー"
+VIEW_HISTORY = "レビュー一覧"
+
+if "active_view" not in st.session_state:
+    st.session_state["active_view"] = VIEW_UPLOAD
+
 st.title("📝 文書自動レビューツール")
 st.caption("Gemini APIで複数フォーマットの文書を自動レビューし、結果を保存・一覧参照できます。")
 
-tab_upload, tab_history = st.tabs(["📤 アップロード＆レビュー", "📚 過去のレビュー一覧"])
+view = st.segmented_control(
+    "表示切り替え",
+    options=[VIEW_UPLOAD, VIEW_HISTORY],
+    key="active_view",
+    label_visibility="collapsed",
+)
 
-# --- タブ1: アップロード＆レビュー ---------------------------------------
-with tab_upload:
+# --- アップロード＆レビュー -------------------------------------------------
+if view == VIEW_UPLOAD:
     st.subheader("ファイルをアップロード")
-    st.write(f"対応形式: {', '.join(SUPPORTED_EXTENSIONS)}")
+    st.write(f"対応形式: {', '.join(SUPPORTED_EXTENSIONS)}（複数選択可）")
 
-    uploaded_file = st.file_uploader(
+    uploaded_files = st.file_uploader(
         "レビューしたいファイルを選択",
         type=[ext.lstrip(".") for ext in SUPPORTED_EXTENSIONS],
+        accept_multiple_files=True,
     )
 
-    if uploaded_file is not None:
-        st.info(f"選択中のファイル: **{uploaded_file.name}**（{uploaded_file.size:,} bytes）")
+    if uploaded_files:
+        st.info(f"選択中のファイル: {len(uploaded_files)}件")
 
         if st.button("🔍 レビューを実行", type="primary"):
             if not GEMINI_API_KEY:
                 st.error("GEMINI_API_KEYがsecretsに設定されていません。")
             else:
-                with st.spinner("文書を読み込んでいます..."):
-                    file_bytes = uploaded_file.getvalue()
+                progress = st.progress(0.0)
+                status_area = st.container()
+                error_count = 0
+
+                for i, uploaded_file in enumerate(uploaded_files):
+                    status_area.write(f"⏳ {uploaded_file.name} を処理中...")
+
                     try:
+                        file_bytes = uploaded_file.getvalue()
                         text = extract_text(uploaded_file.name, file_bytes)
-                    except Exception as e:
-                        st.error("ファイルの読み込みに失敗しました。")
-                        st.exception(e)
-                        st.stop()
 
-                if not text.strip():
-                    st.warning("ファイルからテキストを抽出できませんでした。")
-                else:
-                    with st.spinner("Gemini APIでレビュー中です...（数十秒かかる場合があります）"):
-                        try:
+                        if not text.strip():
+                            status_area.warning(
+                                f"⚠️ {uploaded_file.name}: テキストを抽出できませんでした（スキップ）"
+                            )
+                        else:
                             result = review_document(text, GEMINI_API_KEY)
-                        except Exception as e:
-                            st.error("レビュー実行中にエラーが発生しました。")
-                            st.exception(e)
-                            st.stop()
+                            summary = summarize_result(result)
+                            file_type = uploaded_file.name.split(".")[-1]
+                            db.save_review(supabase, uploaded_file.name, file_type, summary, result)
+                            status_area.write(f"✅ {uploaded_file.name}: {summary}")
+                    except Exception as e:
+                        error_count += 1
+                        status_area.error(f"❌ {uploaded_file.name}: エラーが発生しました（{e}）")
 
-                    summary = summarize_result(result)
-                    file_type = uploaded_file.name.split(".")[-1]
+                    progress.progress((i + 1) / len(uploaded_files))
 
-                    with st.spinner("結果を保存しています..."):
-                        saved = db.save_review(
-                            supabase, uploaded_file.name, file_type, summary, result
-                        )
+                if error_count == 0:
+                    st.success("すべてのファイルのレビューが完了しました。一覧に移動します...")
+                else:
+                    st.warning(
+                        f"{len(uploaded_files) - error_count}件成功、{error_count}件エラーが発生しました。一覧に移動します..."
+                    )
 
-                    st.success(f"レビュー完了：{summary}")
+                st.session_state["active_view"] = VIEW_HISTORY
+                st.rerun()
 
-                    issues = result.get("issues", [])
-                    if issues:
-                        df = pd.DataFrame(issues)
-                        st.dataframe(df, use_container_width=True)
-                    else:
-                        st.write("指摘事項はありませんでした。")
-
-                    st.caption("この結果は自動保存され、「過去のレビュー一覧」タブからいつでも見返せます。")
-
-# --- タブ2: 過去のレビュー一覧 ---------------------------------------------
-with tab_history:
+# --- レビュー一覧 -----------------------------------------------------------
+else:
     st.subheader("これまでのレビュー結果")
 
     if st.button("🔄 一覧を更新"):
@@ -168,6 +179,6 @@ with tab_history:
 
                 col1, col2 = st.columns([1, 5])
                 with col1:
-                    if st.button("🗑️ この結果を削除", key=f"del_{selected_id}"):
+                    if st.button("🗑️ 削除", key=f"del_{selected_id}"):
                         db.delete_review(supabase, selected_id)
                         st.rerun()
