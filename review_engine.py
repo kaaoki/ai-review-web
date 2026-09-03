@@ -7,16 +7,23 @@ review_engine.py
 import io
 import json
 import os
+import time
 
 from google import genai
+from google.genai import errors as genai_errors
 
 # ---- 対応フォーマット ----
 SUPPORTED_EXTENSIONS = [".txt", ".md", ".docx", ".xlsx", ".xlsm", ".pdf"]
 
-# 現時点(2026年9月)でのGemini APIの標準的なFlashモデル。
+# 現時点(2026年9月)でのGemini APIの軽量・低コストなFlash-Liteモデル。
+# 標準のFlashモデルより高速で、混雑(503)にも強い傾向がある。
 # モデルは頻繁に更新されるため、Google AI Studioで最新のモデルIDを
 # 確認し、必要であれば環境変数 GEMINI_MODEL で上書きしてください。
-DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
+DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
+
+# 一時的な混雑(503)やレート制限(429)に対する自動リトライの設定
+MAX_RETRIES = 3
+RETRY_BASE_DELAY_SECONDS = 5  # 1回目失敗後に5秒待機、2回目は10秒、3回目は20秒...
 
 REVIEW_PROMPT_TEMPLATE = """あなたは日本語の業務文書をチェックする校閲者です。
 以下の文書を読み、次の4つの観点で問題点を洗い出してください。
@@ -92,6 +99,33 @@ def extract_text(filename: str, file_bytes: bytes) -> str:
     raise ValueError(f"未対応のファイル形式です: {ext}")
 
 
+def _generate_with_retry(client, model: str, prompt: str):
+    """一時的な混雑(503)やレート制限(429)が出た場合、待機してから再試行する"""
+    last_error = None
+
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            return client.models.generate_content(
+                model=model,
+                contents=prompt,
+                config={
+                    "response_mime_type": "application/json",
+                },
+            )
+        except (genai_errors.ServerError, genai_errors.ClientError) as e:
+            status_code = getattr(e, "code", None)
+            # 503(混雑)・429(レート制限)以外は即座に諦める
+            if status_code not in (503, 429):
+                raise
+
+            last_error = e
+            if attempt < MAX_RETRIES:
+                wait_seconds = RETRY_BASE_DELAY_SECONDS * (2**attempt)
+                time.sleep(wait_seconds)
+
+    raise last_error
+
+
 def review_document(document_text: str, api_key: str, model: str = DEFAULT_MODEL) -> dict:
     """Gemini APIで文書をレビューし、構造化された結果を返す"""
     if not document_text.strip():
@@ -100,13 +134,7 @@ def review_document(document_text: str, api_key: str, model: str = DEFAULT_MODEL
     client = genai.Client(api_key=api_key)
     prompt = REVIEW_PROMPT_TEMPLATE.format(document_text=document_text[:60000])
 
-    response = client.models.generate_content(
-        model=model,
-        contents=prompt,
-        config={
-            "response_mime_type": "application/json",
-        },
-    )
+    response = _generate_with_retry(client, model, prompt)
 
     raw_text = response.text.strip()
     # コードブロック記法が付いてしまった場合の保険
