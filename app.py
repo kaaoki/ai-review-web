@@ -72,8 +72,21 @@ GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 VIEW_UPLOAD = "アップロード＆レビュー"
 VIEW_HISTORY = "レビュー一覧"
 
+# segmented_controlのkey("active_view")は、ウィジェット生成後の同一実行内では
+# 直接書き換えられない(StreamlitWidgetAlreadyInstantiatedError)。
+# そのため、切り替えたいときは "force_view" に希望の値を入れてrerunし、
+# ウィジェット生成より前のこの位置で "active_view" に反映させる。
+if "force_view" in st.session_state:
+    st.session_state["active_view"] = st.session_state.pop("force_view")
+
 if "active_view" not in st.session_state:
     st.session_state["active_view"] = VIEW_UPLOAD
+
+# 前回の実行で予約された画面切り替えがあれば、ウィジェット生成前に反映する。
+# （ウィジェットに紐づくsession_stateは、そのウィジェットが描画された後の
+# 　同一実行内では直接書き換えられないため、専用のキーを経由する）
+if "_pending_view" in st.session_state:
+    st.session_state["active_view"] = st.session_state.pop("_pending_view")
 
 st.title("📝 文書自動レビューツール")
 st.caption("Gemini APIで複数フォーマットの文書を自動レビューし、結果を保存・一覧参照できます。")
@@ -137,7 +150,7 @@ if view == VIEW_UPLOAD:
                         f"{len(uploaded_files) - error_count}件成功、{error_count}件エラーが発生しました。一覧に移動します..."
                     )
 
-                st.session_state["active_view"] = VIEW_HISTORY
+                st.session_state["_pending_view"] = VIEW_HISTORY
                 st.rerun()
 
 # --- レビュー一覧 -----------------------------------------------------------
