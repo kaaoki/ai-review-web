@@ -1,4 +1,5 @@
 .streamlit/secrets.toml
+.streamlit/Memo.txt
 __pycache__/
 *.pyc
 .venv/
