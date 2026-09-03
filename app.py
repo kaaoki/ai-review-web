@@ -69,24 +69,18 @@ GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 # 画面切り替え（st.tabsはコードから切り替えられないため、
 # セグメントコントロール＋session_stateで自前実装する）
 # ---------------------------------------------------------------------------
-VIEW_UPLOAD = "アップロード＆レビュー"
+VIEW_UPLOAD = "アップロード"
 VIEW_HISTORY = "レビュー一覧"
 
 # segmented_controlのkey("active_view")は、ウィジェット生成後の同一実行内では
 # 直接書き換えられない(StreamlitWidgetAlreadyInstantiatedError)。
-# そのため、切り替えたいときは "force_view" に希望の値を入れてrerunし、
+# そのため、切り替えたいときは "_pending_view" に希望の値を入れてrerunし、
 # ウィジェット生成より前のこの位置で "active_view" に反映させる。
-if "force_view" in st.session_state:
-    st.session_state["active_view"] = st.session_state.pop("force_view")
+if "_pending_view" in st.session_state:
+    st.session_state["active_view"] = st.session_state.pop("_pending_view")
 
 if "active_view" not in st.session_state:
     st.session_state["active_view"] = VIEW_UPLOAD
-
-# 前回の実行で予約された画面切り替えがあれば、ウィジェット生成前に反映する。
-# （ウィジェットに紐づくsession_stateは、そのウィジェットが描画された後の
-# 　同一実行内では直接書き換えられないため、専用のキーを経由する）
-if "_pending_view" in st.session_state:
-    st.session_state["active_view"] = st.session_state.pop("_pending_view")
 
 st.title("📝 文書自動レビューツール")
 st.caption("Gemini APIで複数フォーマットの文書を自動レビューし、結果を保存・一覧参照できます。")
@@ -167,16 +161,22 @@ else:
     else:
         list_df = pd.DataFrame(reviews)[["file_name", "file_type", "summary", "created_at"]]
         list_df.columns = ["ファイル名", "種別", "サマリー", "実行日時"]
-        st.dataframe(list_df, use_container_width=True, hide_index=True)
 
-        options = {
-            f"{r['file_name']}（{r['created_at'][:19].replace('T', ' ')}）": r["id"]
-            for r in reviews
-        }
-        selected_label = st.selectbox("詳細を見るレビューを選択", options.keys())
+        st.caption("表の行をクリックすると詳細が表示されます。")
+        event = st.dataframe(
+            list_df,
+            use_container_width=True,
+            hide_index=True,
+            on_select="rerun",
+            selection_mode="single-row",
+        )
 
-        if selected_label:
-            selected_id = options[selected_label]
+        selected_rows = event.selection.rows if event and event.selection else []
+
+        if not selected_rows:
+            st.info("上の表から行を選択してください。")
+        else:
+            selected_id = reviews[selected_rows[0]]["id"]
             detail = db.get_review(supabase, selected_id)
 
             if detail:
